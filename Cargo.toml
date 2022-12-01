@@ -1,0 +1,17 @@
+[package]
+name = "gutenberg-clock"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+gutenberg-rs = "0.1.4"
+tokio = { version = "1.13.0", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.87"
+rusqlite = { version = "0.28.0", features = ["bundled"] }
+chrono = "0.4.23"
+rand = "0.8.5"
+text_io = "0.1.12"
+indicatif = "0.17.1"
