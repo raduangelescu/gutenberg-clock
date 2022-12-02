@@ -15,3 +15,4 @@ chrono = "0.4.23"
 rand = "0.8.5"
 text_io = "0.1.12"
 indicatif = "0.17.1"
+web-view = { version = "0.7" }

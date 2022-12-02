@@ -13,9 +13,10 @@ use std::collections::HashMap;
 use utils::all_formats_to_text;
 mod utils;
 use text_io::scan;
+use web_view::*;
 
-pub struct BookFind {
-    bookid: String,
+struct BookFind {
+    book_id: String,
     text: String,
 }
 
@@ -24,6 +25,7 @@ pub struct BookMetadata {
     title: String,
     author: String,
 }
+#[derive(Debug, Clone)]
 pub struct LitClockEntry {
     paragraph: String,
     author: String,
@@ -39,9 +41,10 @@ async fn generate_fts(
     let fts_connection = Box::new(Connection::open(fts_filename)?);
     fts_connection.execute("CREATE VIRTUAL TABLE book USING fts5(bookid, text);", ())?;
     fts_connection.execute_batch("PRAGMA journal_mode = OFF;PRAGMA synchronous = 0;PRAGMA cache_size = 1000000;PRAGMA locking_mode = EXCLUSIVE;PRAGMA temp_store = MEMORY;")?;
-    let mut fts_stmt = fts_connection.prepare("INSERT INTO book(bookid, text) VALUES(?1, ?2)")?;
+    let mut fts_insert_stmt =
+        fts_connection.prepare("INSERT INTO book(bookid, text) VALUES(?1, ?2)")?;
 
-    let books = cache.query(&json!({
+    let book_gutenberg_ids = cache.query(&json!({
         "language": "\"en\"",
         "bookshelve": "'Romantic Fiction',
                 'Astounding Stories','Mystery Fiction','Erotic Fiction',
@@ -49,65 +52,89 @@ async fn generate_fts(
                 'Short Stories','Harvard Classics','Science Fiction','Gothic Fiction','Fantasy'",
     }))?;
 
-    let pb = ProgressBar::new(books.len() as u64);
-    pb.set_style(
+    let progress_bar = ProgressBar::new(book_gutenberg_ids.len() as u64);
+    progress_bar.set_style(
         ProgressStyle::with_template(
             "{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.white/blue}] ({eta})",
         )?
         .progress_chars("█  "),
     );
-    pb.set_message("Building full text  search db");
+    progress_bar.set_message("Building full text  search db");
 
-    for (idx, gutenberg_id) in books.iter().enumerate() {
-        pb.set_position(idx as u64);
+    for (idx, gutenberg_id) in book_gutenberg_ids.iter().enumerate() {
+        progress_bar.set_position(idx as u64);
+
         let links = cache.get_download_links(vec![*gutenberg_id])?;
-        match links.first() {
-            Some(link) => {
-                let text = get_text_from_link(&settings, link).await?;
-                let stripped_text = strip_headers(text);
-                let paragraphs: Split<&str> = stripped_text.split("\n\r");
-                for paragraph in paragraphs {
-                    if paragraph.trim().is_empty() {
-                        continue;
-                    }
 
-                    fts_stmt.execute((format!("${}${}$", gutenberg_id, link), paragraph))?;
+        if let Some(link) = links.first() {
+            let text = get_text_from_link(&settings, link).await?;
+            let stripped_text = strip_headers(text);
+            let paragraphs: Split<&str> = stripped_text.split("\n\r");
+            for paragraph in paragraphs {
+                let paragraph_trimmed = paragraph.trim();
+
+                if paragraph_trimmed.is_empty() {
+                    continue;
                 }
+
+                if paragraph_trimmed.len() < 64 {
+                    continue;
+                }
+
+                fts_insert_stmt
+                    .execute((format!("${}${}$", gutenberg_id, link), paragraph_trimmed))?;
             }
-            None => {}
-        };
+        }
     }
-    pb.finish();
+    progress_bar.finish();
     Ok(())
 }
 
-async fn exec() -> Result<(), Error> {
-    // let's do something fun in this example :
-    // - create the cache
-    // - download some english books from particular shelves
-    // - search for a certain time mention in all books
-    // - display the paragraph with the time mention
+fn get_lit_clock_data(
+    db_filename: &str,
+    time_now: DateTime<Local>,
+) -> Result<LitClockEntry, Error> {
+    let lit_clock_db = Box::new(Connection::open(db_filename)?);
+    let mut m = lit_clock_db.prepare("SELECT distinct(time) as t FROM littime order by t;")?;
+    let available_times: Vec<u32> = m
+        .query_map((), |row| Ok(row.get::<usize, u32>(0)?))?
+        .map(|x| match x {
+            Ok(_x) => _x,
+            Err(_) => 0,
+        })
+        .collect();
 
-    // here we create the cache settings with the default values
-    let settings = GutenbergCacheSettings::default();
+    let mut number_search = time_now.hour12().1 * 100 + time_now.minute();
+    let find_result = available_times.iter().rfind(|&&x| x <= number_search);
 
-    // generate the sqlite cache (this will download, parse and create the db)
-    if !std::path::Path::new(&settings.cache_filename).exists() {
-        setup_sqlite(&settings, false, true).await?;
+    if let Some(find) = find_result {
+        number_search = *find;
     }
-    let fts_filename = "fts.db";
-    let final_filename = "lit_clock.db";
-    
-    // we grab the newly create cache
-    let mut cache = SQLiteCache::get_cache(&settings)?;
-    if !std::path::Path::new(fts_filename).exists() {
-        generate_fts(&mut cache, settings, fts_filename).await?;
+    let mut e =
+        lit_clock_db.prepare("SELECT text, author,title,link,time FROM littime WHERE time = ?1")?;
+    let clock_entries_results: Vec<rusqlite::Result<LitClockEntry>> = e.query_map((number_search,), |row| {
+        Ok(LitClockEntry {
+            paragraph: row.get(0)?,
+            author: row.get(1)?,
+            title: row.get(2)?,
+            link: row.get(3)?,
+        })
+    })?.collect();
+    let pick = clock_entries_results.choose(&mut rand::thread_rng());
+    if let Some(p) = pick {
+        if let Ok(d) = p {
+            return Ok(d.clone());
+        }
     }
-    let fts_connection = Box::new(Connection::open(fts_filename)?);
-    if !std::path::Path::new(final_filename).exists() {
-        let cfinal_table = Box::new(Connection::open(final_filename)?);
+    return Err(Error::InvalidResult("no time".to_string()));
+}
 
-        cfinal_table.execute_batch(
+fn generate_lit_clock_db(cache: &mut SQLiteCache, db_filename: &str) -> Result<(), Error> {
+    let fts_connection = Box::new(Connection::open(db_filename)?);
+    if !std::path::Path::new(db_filename).exists() {
+        let lit_clock_db = Box::new(Connection::open(db_filename)?);
+
+        lit_clock_db.execute_batch(
             "CREATE TABLE littime (
             id	INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE,
             time INTEGER,
@@ -118,24 +145,24 @@ async fn exec() -> Result<(), Error> {
         );
         PRAGMA journal_mode = OFF;PRAGMA synchronous = 0;PRAGMA cache_size = 1000000;PRAGMA locking_mode = EXCLUSIVE;PRAGMA temp_store = MEMORY;"
         )?;
-        let mut insert = cfinal_table.prepare(
+        let mut insert = lit_clock_db.prepare(
             "INSERT INTO littime(time, text, author, title, link) VALUES(?1, ?2, ?3, ?4, ?5)",
         )?;
-        let mut book_metadata: HashMap<usize, BookMetadata> = HashMap::new();
+        let mut book_metadata_map: HashMap<usize, BookMetadata> = HashMap::new();
 
-        let pb = ProgressBar::new((13 * 60) as u64);
-        pb.set_style(
+        let progress_bar = ProgressBar::new((13 * 60) as u64);
+        progress_bar.set_style(
             ProgressStyle::with_template(
                 "{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.white/blue}] ({eta})",
             )?
             .progress_chars("█  "),
         );
-        pb.set_message(format!("Building clock db {}", final_filename));
-    
+        progress_bar.set_message(format!("Building clock db {}", db_filename));
+
         for hour in 1..13 {
             for minute in 0..60 {
                 let time_number = hour * 100 + minute;
-                pb.set_position((hour * 60 + minute) as u64);
+                progress_bar.set_position((hour * 60 + minute) as u64);
 
                 let word_times = all_formats_to_text(hour, minute)?;
                 let mut query_words = "".to_string();
@@ -148,10 +175,10 @@ async fn exec() -> Result<(), Error> {
                     };
                 }
                 let mut stmt =
-                        fts_connection.prepare("SELECT bookid, snippet(book, 1,'<b>', '</b>', '', 64)  FROM book WHERE text MATCH ?1 ")?;
+                        fts_connection.prepare("SELECT bookid, highlight(book, 1,'<b>', '</b>')  FROM book WHERE text MATCH ?1 ")?;
                 let res_iter = stmt.query_map((&query_words,), |row| {
                     Ok(BookFind {
-                        bookid: row.get(0)?,
+                        book_id: row.get(0)?,
                         text: row.get(1)?,
                     })
                 })?;
@@ -160,14 +187,13 @@ async fn exec() -> Result<(), Error> {
                     let book_paragraph = entry?;
                     let book_id;
                     let link: String;
-                    scan!(book_paragraph.bookid.bytes() => "${}${}$", book_id, link);
+                    scan!(book_paragraph.book_id.bytes() => "${}${}$", book_id, link);
 
                     let mut metadata: Option<&BookMetadata> = None;
-                    if let Some(data) = book_metadata.get(&book_id) {
+                    if let Some(data) = book_metadata_map.get(&book_id) {
                         metadata = Some(data);
-                    }
-                    else {
-                         let query = "SELECT 
+                    } else {
+                        let query = "SELECT 
                          titles.name, 
                          authors.name 
                          FROM titles, books, authors, book_authors 
@@ -182,13 +208,13 @@ async fn exec() -> Result<(), Error> {
                                 author: row.get(1)?,
                             })
                         });
-                        
+
                         if let Ok(data) = res_meta {
-                            book_metadata.insert(book_id, data);
-                            metadata = book_metadata.get(&book_id);
+                            book_metadata_map.insert(book_id, data);
+                            metadata = book_metadata_map.get(&book_id);
                         }
                     }
-                   
+
                     if let Some(data) = metadata {
                         insert.execute((
                             time_number,
@@ -200,50 +226,71 @@ async fn exec() -> Result<(), Error> {
                     }
                 }
             }
-            pb.finish();
+            progress_bar.finish();
         }
-        cfinal_table.execute_batch("CREATE INDEX time_idx ON littime (`time` ASC);")?;
-        cfinal_table.flush_prepared_statement_cache();
+        lit_clock_db.execute_batch("CREATE INDEX time_idx ON littime (`time` ASC);")?;
+        lit_clock_db.flush_prepared_statement_cache();
     }
+    Ok(())
+}
 
-    let cfinal_table = Box::new(Connection::open(final_filename)?);
-    let mut m = cfinal_table.prepare("SELECT distinct(time) as t FROM littime order by t;")?;
-
-    let available_times = m.query_map((), |row| Ok(row.get::<usize, u32>(0)?))?;
-
-    let time_now = Local::now();
-    let mut number_search = time_now.hour12().1 * 100 + time_now.minute();
-    for time in available_times {
-        let time_value = time?;
-        if number_search <= time_value {
-            number_search = time_value;
-            break;
-        }
-    }
-    let mut e =
-        cfinal_table.prepare("SELECT text, author,title,link,time FROM littime WHERE time = ?1")?;
-    let fres = e.query_map((number_search,), |row| {
-        Ok(LitClockEntry {
-            paragraph: row.get(0)?,
-            author: row.get(1)?,
-            title: row.get(2)?,
-            link: row.get(3)?,
-        })
-    })?;
-    let collect_a: Vec<rusqlite::Result<LitClockEntry>> = fres.collect();
-    let picked = collect_a.choose(&mut rand::thread_rng());
-    match picked {
-        Some(pick_result) => match pick_result {
-            Ok(r) => {
-                println!("{}", r.paragraph);
-                println!("--{}  by {}", r.title, r.author);
-                println!("{}", r.link);
-                println!("------------------------------------------------------------------");
+fn show_app(html_content: &str, lit_clock_db_filename: &str)-> Result<(), Error> {
+    web_view::builder()
+        .title("Gutenberg clock")
+        .content(Content::Html(html_content))
+        .size(800, 600)
+        .resizable(false)
+        .debug(true)
+        .user_data(())
+        .invoke_handler(|_webview, _arg| match _arg {
+            "refreshtime" => {
+                let time_now = Local::now();
+                let rs = get_lit_clock_data(lit_clock_db_filename, time_now);
+                if let Ok(r) = rs {
+                    let time_string = format!("{}:{}", time_now.hour12().1, time_now.minute());
+                    let mut paragraph = r.paragraph.replace("\"", "'");
+                    paragraph = paragraph.lines().collect::<Vec<&str>>().join(" ");
+                    let title = r.title.replace("\"", "'");
+                    let author = r.author.replace("\"", "'");
+                    let eval_func = format!(
+                        "updateData(\"{}\", \"{}\", \"{}\", \"{}\", \"{}\");",
+                        time_string, &paragraph, &title, &author, &r.link
+                    );
+                    _webview.eval(eval_func.as_str())?;
+                }
+                Ok(())
             }
-            Err(_) => {}
-        },
-        None => {}
+            _ => {
+                unimplemented!();
+            }
+        })
+        .run()
+        .unwrap();
+    Ok(())
+}
+
+async fn exec() -> Result<(), Error> {
+    let fts_filename = "fts.db";
+    let lit_clock_db_filename = "lit_clock.db";
+
+    let settings = GutenbergCacheSettings::default();
+
+    if !std::path::Path::new(&settings.cache_filename).exists() {
+        setup_sqlite(&settings, false, true).await?;
     }
+
+    let mut cache = SQLiteCache::get_cache(&settings)?;
+    
+    if !std::path::Path::new(fts_filename).exists() {
+        generate_fts(&mut cache, settings, fts_filename).await?;
+    }
+
+    if !std::path::Path::new(lit_clock_db_filename).exists() {
+        generate_lit_clock_db(&mut cache, lit_clock_db_filename)?;
+    }
+
+    show_app(include_str!("clock.html"), lit_clock_db_filename)?;
+  
     Ok(())
 }
 

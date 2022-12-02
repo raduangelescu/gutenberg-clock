@@ -1,0 +1,49 @@
+<html>
+    <style>
+        body {
+            font-family: georgia, serif;
+            background-color: #222222;
+            text-align: center;}
+        p    {
+            color: #EDCFA9;
+            text-align: center;}
+        h2   {
+            color: #EDCFA9;
+        }
+        #link,a {
+            color: #434242;
+            text-align: center;}
+        #time {
+            color: #D57149;
+            text-align: center;}
+        #titleauthor {
+            color: #D57149}
+        #paragraph {
+            color: #EDCFA9; font-size:16px;}
+    </style>
+    <body>
+        <h2 > Gutenberg Clock </h1>
+        <h1 id="time">12:43</h2>
+        <p id="paragraph">Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.<p>
+        <div id="titleauthor">"<span  id ="title">The story of Lorem Ispsum</span >" by <span  id ="author">Dolorum, Dolores </span > </div>
+        <div id="link"><a href="{{link}}">https://loremipsum/dolorum/sit/amet.txt</a></div>
+        <script type="text/javascript">
+		
+        external.invoke('refreshtime');
+
+        setTimeout(function() {
+            external.invoke('refreshtime');
+        }, "30000")
+        function updateData(time, paragraph, title, author, link ) {
+            document.getElementById('time').innerHTML = time;
+            document.getElementById('paragraph').innerHTML = paragraph;
+            document.getElementById('title').innerHTML = title;
+            document.getElementById('link').innerHTML = link;
+            document.getElementById('author').innerHTML = author;
+            setTimeout(function() {
+                external.invoke('refreshtime');
+            }, "30000")
+        }
+		</script>
+    </body>
+</html>
