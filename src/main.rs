@@ -129,10 +129,10 @@ fn get_lit_clock_data(
     return Err(Error::InvalidResult("no time".to_string()));
 }
 
-fn generate_lit_clock_db(cache: &mut SQLiteCache, db_filename: &str) -> Result<(), Error> {
+fn generate_lit_clock_db(cache: &mut SQLiteCache, lit_clock_db:&str, db_filename:&str) -> Result<(), Error> {
     let fts_connection = Box::new(Connection::open(db_filename)?);
-    if !std::path::Path::new(db_filename).exists() {
-        let lit_clock_db = Box::new(Connection::open(db_filename)?);
+    if !std::path::Path::new(lit_clock_db).exists() {
+        let lit_clock_db = Box::new(Connection::open(lit_clock_db)?);
 
         lit_clock_db.execute_batch(
             "CREATE TABLE littime (
