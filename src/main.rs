@@ -286,7 +286,7 @@ async fn exec() -> Result<(), Error> {
     }
 
     if !std::path::Path::new(lit_clock_db_filename).exists() {
-        generate_lit_clock_db(&mut cache, lit_clock_db_filename)?;
+        generate_lit_clock_db(&mut cache, lit_clock_db_filename, fts_filename)?;
     }
 
     show_app(include_str!("clock.html"), lit_clock_db_filename)?;
